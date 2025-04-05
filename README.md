@@ -1,4 +1,4 @@
-# 📦 TeleCopy - Telegram Message Copier & Archiver
+# 💬 TeleCopy - Telegram Message Copier & Archiver
 
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue.svg)
 ![Status](https://img.shields.io/badge/status-active-brightgreen.svg)
