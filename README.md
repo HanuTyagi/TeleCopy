@@ -71,7 +71,7 @@ You can get your own ```API_ID``` and ```API_HASH``` on this [Link](https://my.t
 
 Simply Login with your ```Telegram``` number, and then chose an app name of your chose and a URL.
 
-Also, When using ```TeleCopy```, Make sure that your enter the Phone number with your countries' Phone code
+Also, When using ```TeleCopy```, Make sure that you enter the Phone number with your countries' Phone code
 
 ---
 #### 🔎 Restarting Instructions
