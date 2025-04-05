@@ -64,7 +64,7 @@ python main.py
 
 ---
 #### 🔎 Restarting Instructions
-Each time you restart the Terminal, you need to first activate the Virtual Environment and only then can you run TeleCopy
+Each time you restart the Terminal, you'll need to first activate the Virtual Environment and only then can you run ```TeleCopy```
 ```bash
 source .venv/bin/activate
 python main.py
