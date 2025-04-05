@@ -63,6 +63,17 @@ python main.py
 ``` Simply run the script and it will prompt for missing values interactively.```
 
 ---
+
+### Note
+For ```TeleCopy``` to work, You'll need an ```API_ID``` and ```API_HASH```.
+
+You can get your own ```API_ID``` and ```API_HASH``` on this [Link](https://my.telegram.org/auth?to=apps)
+
+Simply Login with your ```Telegram``` number, and then chose an app name of your chose and a URL.
+
+Also, When using ```TeleCopy```, Make sure that your enter the Phone number with your countries' Phone code
+
+---
 #### 🔎 Restarting Instructions
 Each time you restart the Terminal, you'll need to first activate the Virtual Environment and only then can you run ```TeleCopy```
 ```bash
