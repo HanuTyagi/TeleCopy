@@ -231,7 +231,7 @@ def show_menu():
             tg.login()
             session_active = True
             print("✅ Connected to Telegram.")
-            time.sleep(1)
+            time.sleep(2)
 
         elif choice == "5":
             update_config()
