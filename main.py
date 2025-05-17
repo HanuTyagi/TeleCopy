@@ -21,7 +21,7 @@ EXCLUDE_TYPES = [
 ]
 
 def check_env_vars():
-    required = [ "PHONE", "API_ID", "API_HASH"]
+    required = ["PHONE", "API_ID", "API_HASH"]
     missing = [var for var in required if not os.getenv(var)]
     if missing:
         print(f"Missing env values: {missing}")
@@ -33,16 +33,15 @@ def check_env_vars():
         print("Restart TeleCopy")
         exit()
 
-
 def initialize_telegram():
     return Telegram(
-        api_id=os.getenv("API_ID"),
+        api_id=int(os.getenv("API_ID")),
         api_hash=os.getenv("API_HASH"),
         phone=os.getenv("PHONE"),
         database_encryption_key=os.getenv("DB_PASSWORD"),
         files_directory=os.getenv("FILES_DIRECTORY"),
         proxy_server=os.getenv("PROXY_SERVER"),
-        proxy_port=os.getenv("PROXY_PORT"),
+        proxy_port=int(os.getenv("PROXY_PORT")) if os.getenv("PROXY_PORT") else None,
         proxy_type={"@type": os.getenv("PROXY_TYPE")} if os.getenv("PROXY_TYPE") else None,
     )
 
@@ -55,9 +54,8 @@ def update_config():
     print("\nCurrent Configuration:")
     for idx, (key, val) in enumerate(current.items(), start=1):
         print(f"{idx}. {key}: {val}")
-    choice = -1
     print("0. Return to main menu")
-    while choice!=0:
+    while True:
         choice = input("Select which one to update (1-3): ").strip()
         if choice == "0":
             python = sys.executable
@@ -105,7 +103,7 @@ def get_all_messages(tg, chat_id):
     messages = []
     last = 0
     while True:
-        r = tg.get_chat_history(chat_id, limit=100, from_message_id=last)
+        r = tg.get_chat_history(chat_id=chat_id, limit=100, from_message_id=last)
         r.wait()
         if not r.update["messages"]:
             break
@@ -133,7 +131,7 @@ def custom_copy_messages(tg):
     try:
         with open("message/message_copy_dict.pickle", "rb") as f:
             copied = pickle.load(f)
-    except OSError:
+    except (OSError, FileNotFoundError):
         copied = {}
 
     src = os.getenv("SOURCE")
@@ -165,11 +163,47 @@ def custom_copy_messages(tg):
             print(f"Error copying message {mid}: {e}")
             continue
 
-    os.makedirs("data", exist_ok=True)
+    os.makedirs("message", exist_ok=True)
     with open("message/message_copy_dict.pickle", "wb") as f:
         pickle.dump(copied, f)
 
     print("✅ Custom copy complete.")
+
+def copy_past_messages(tg):
+    src = os.getenv("SOURCE")
+    dst = os.getenv("DESTINATION")
+    if not src or not dst:
+        print("⚠️ SOURCE and DESTINATION must be set first. Please choose option 1 from the menu.")
+        return
+    src = int(src)
+    dst = int(dst)
+    messages = get_all_messages(tg, src)
+    print(f"Copying {len(messages)} messages...")
+    for m in reversed(messages):
+        try:
+            copy_message(tg, src, dst, m["id"])
+            print(f"Copied message ID {m['id']}")
+        except Exception as e:
+            print(f"Error copying message ID {m['id']}: {e}")
+
+def monitor_live(tg):
+    print("🔁 Live monitoring started. Press Ctrl+C to stop.")
+    src = int(os.getenv("SOURCE"))
+    dst = int(os.getenv("DESTINATION"))
+
+    def handler(msg):
+        try:
+            if msg["content"]["@type"] in EXCLUDE_TYPES:
+                return
+            if msg["chat_id"] == src:
+                result = copy_message(tg, src, dst, msg["id"])
+                print(f"Forwarded {msg['id']} -> {result.update['messages'][0]['id']}")
+        except Exception as e:
+            print(f"Live copy error: {e}")
+
+    tg.add_message_handler(handler)
+    while True:
+        time.sleep(1)
 
 def show_menu():
     tg = None
@@ -215,7 +249,7 @@ def show_menu():
                 print("🔁 Detected config change – resetting session...")
                 try:
                     shutil.rmtree('data')
-                except (FileNotFoundError):
+                except FileNotFoundError:
                     print("No Last Session Config Found")
 
             os.makedirs("data", exist_ok=True)
@@ -225,7 +259,6 @@ def show_menu():
                     "API_HASH": new_api_hash,
                     "PHONE": new_phone
                 }, f)
-
 
             tg = initialize_telegram()
             tg.login()
@@ -241,7 +274,7 @@ def show_menu():
 
         elif not session_active:
             print("❌ Please connect to Telegram first using option 0.")
-        
+
         elif choice == "1":
             set_source_and_destination(tg)
         elif choice == "2":
