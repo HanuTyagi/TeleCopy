@@ -5,6 +5,7 @@ import shutil
 import pickle
 import threading
 import time
+import re
 from datetime import datetime
 from dotenv import load_dotenv, set_key, find_dotenv
 from telegram.client import Telegram
@@ -35,13 +36,13 @@ def check_env_vars():
 
 def initialize_telegram():
     return Telegram(
-        api_id=int(os.getenv("API_ID")),
+        api_id=os.getenv("API_ID"),
         api_hash=os.getenv("API_HASH"),
         phone=os.getenv("PHONE"),
         database_encryption_key=os.getenv("DB_PASSWORD"),
         files_directory=os.getenv("FILES_DIRECTORY"),
         proxy_server=os.getenv("PROXY_SERVER"),
-        proxy_port=int(os.getenv("PROXY_PORT")) if os.getenv("PROXY_PORT") else None,
+        proxy_port=os.getenv("PROXY_PORT"),
         proxy_type={"@type": os.getenv("PROXY_TYPE")} if os.getenv("PROXY_TYPE") else None,
     )
 
@@ -54,8 +55,9 @@ def update_config():
     print("\nCurrent Configuration:")
     for idx, (key, val) in enumerate(current.items(), start=1):
         print(f"{idx}. {key}: {val}")
+    choice = -1
     print("0. Return to main menu")
-    while True:
+    while choice != 0:
         choice = input("Select which one to update (1-3): ").strip()
         if choice == "0":
             python = sys.executable
@@ -96,14 +98,25 @@ def copy_message(tg, from_chat_id, to_chat_id, message_id):
         'message_ids': [message_id],
         'send_copy': True,
     }
-    result = tg.call_method('forwardMessages', data, block=True)
-    return result
+    while True:
+        try:
+            result = tg.call_method('forwardMessages', data, block=True)
+            return result
+        except Exception as e:
+            error_msg = str(e)
+            match = re.search(r'flood_wait_(\d+)', error_msg)
+            if match:
+                wait_time = int(match.group(1))
+                print(f"⏳ Rate limited by Telegram. Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                raise e
 
 def get_all_messages(tg, chat_id):
     messages = []
     last = 0
     while True:
-        r = tg.get_chat_history(chat_id=chat_id, limit=100, from_message_id=last)
+        r = tg.get_chat_history(chat_id, limit=100, from_message_id=last)
         r.wait()
         if not r.update["messages"]:
             break
@@ -131,7 +144,7 @@ def custom_copy_messages(tg):
     try:
         with open("message/message_copy_dict.pickle", "rb") as f:
             copied = pickle.load(f)
-    except (OSError, FileNotFoundError):
+    except OSError:
         copied = {}
 
     src = os.getenv("SOURCE")
@@ -159,6 +172,7 @@ def custom_copy_messages(tg):
             new_id = result.update["messages"][0]["id"]
             copied[mid] = new_id
             print(f"Copied {mid} -> {new_id}")
+            time.sleep(1.5)
         except Exception as e:
             print(f"Error copying message {mid}: {e}")
             continue
@@ -170,40 +184,36 @@ def custom_copy_messages(tg):
     print("✅ Custom copy complete.")
 
 def copy_past_messages(tg):
-    src = os.getenv("SOURCE")
-    dst = os.getenv("DESTINATION")
-    if not src or not dst:
-        print("⚠️ SOURCE and DESTINATION must be set first. Please choose option 1 from the menu.")
-        return
-    src = int(src)
-    dst = int(dst)
-    messages = get_all_messages(tg, src)
-    print(f"Copying {len(messages)} messages...")
-    for m in reversed(messages):
-        try:
-            copy_message(tg, src, dst, m["id"])
-            print(f"Copied message ID {m['id']}")
-        except Exception as e:
-            print(f"Error copying message ID {m['id']}: {e}")
+    try:
+        with open("message/message_copy_dict.pickle", "rb") as f:
+            copied = pickle.load(f)
+    except OSError:
+        copied = {}
 
-def monitor_live(tg):
-    print("🔁 Live monitoring started. Press Ctrl+C to stop.")
     src = int(os.getenv("SOURCE"))
     dst = int(os.getenv("DESTINATION"))
 
-    def handler(msg):
+    all_messages = get_all_messages(tg, src)
+    print(f"Copying {len(all_messages)} messages...")
+    for m in reversed(all_messages):
+        mid = m["id"]
+        if mid in copied:
+            continue
         try:
-            if msg["content"]["@type"] in EXCLUDE_TYPES:
-                return
-            if msg["chat_id"] == src:
-                result = copy_message(tg, src, dst, msg["id"])
-                print(f"Forwarded {msg['id']} -> {result.update['messages'][0]['id']}")
+            result = copy_message(tg, src, dst, mid)
+            new_id = result.update["messages"][0]["id"]
+            copied[mid] = new_id
+            print(f"Copied {mid} -> {new_id}")
+            time.sleep(1.5)
         except Exception as e:
-            print(f"Live copy error: {e}")
+            print(f"Error copying message {mid}: {e}")
+            continue
 
-    tg.add_message_handler(handler)
-    while True:
-        time.sleep(1)
+    os.makedirs("message", exist_ok=True)
+    with open("message/message_copy_dict.pickle", "wb") as f:
+        pickle.dump(copied, f)
+
+    print("✅ Full copy complete.")
 
 def show_menu():
     tg = None
@@ -213,7 +223,7 @@ def show_menu():
         os.system("clear" if os.name == "posix" else "cls")
         print(r"""
  _________  _______   ___       _______   ________  ________  ________  ___    ___ 
-|\___   ___\\  ___ \ |\  \     |\  ___ \ |\   ____\|\   __  \|\   __  \|\  \  /  /|
+|\___   ___\\  ___ \ |\  \     |\  ___ \ |\   ____\\\   __  \|\   __  \|\  \  /  /|
 \|___ \  \_\ \   __/|\ \  \    \ \   __/|\ \  \___|\ \  \|\  \ \  \|\  \ \  \/  / /
      \ \  \ \ \  \_|/_\ \  \    \ \  \_|/_\ \  \    \ \  \\\  \ \   ____\ \    / / 
       \ \  \ \ \  \_|\ \ \  \____\ \  \_|\ \ \  \____\ \  \\\  \ \  \___|\/  /  /  
@@ -249,7 +259,7 @@ def show_menu():
                 print("🔁 Detected config change – resetting session...")
                 try:
                     shutil.rmtree('data')
-                except FileNotFoundError:
+                except (FileNotFoundError):
                     print("No Last Session Config Found")
 
             os.makedirs("data", exist_ok=True)
@@ -274,13 +284,12 @@ def show_menu():
 
         elif not session_active:
             print("❌ Please connect to Telegram first using option 0.")
-
         elif choice == "1":
             set_source_and_destination(tg)
         elif choice == "2":
             copy_past_messages(tg)
         elif choice == "3":
-            monitor_live(tg)
+            monitor_live(tg)  # Assuming it's implemented elsewhere
         elif choice == "4":
             custom_copy_messages(tg)
         else:
@@ -288,3 +297,4 @@ def show_menu():
 
 if __name__ == "__main__":
     show_menu()
+        
