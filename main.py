@@ -172,7 +172,6 @@ def custom_copy_messages(tg):
             new_id = result.update["messages"][0]["id"]
             copied[mid] = new_id
             print(f"Copied {mid} -> {new_id}")
-            time.sleep(1.5)
         except Exception as e:
             print(f"Error copying message {mid}: {e}")
             continue
@@ -204,7 +203,6 @@ def copy_past_messages(tg):
             new_id = result.update["messages"][0]["id"]
             copied[mid] = new_id
             print(f"Copied {mid} -> {new_id}")
-            time.sleep(1.5)
         except Exception as e:
             print(f"Error copying message {mid}: {e}")
             continue
