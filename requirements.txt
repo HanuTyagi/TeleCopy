@@ -2,3 +2,5 @@ python-dotenv
 python-telegram
 telegram-text
 setuptools
+tqdm
+backoff
