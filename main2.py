@@ -147,7 +147,7 @@ class TeleCopy:
         with open("data/copy_map.pkl", "wb") as f:
             pickle.dump(data, f)
 
-        def date_copy(self):
+    def date_copy(self):
         """Copy messages within date range"""
         if not self.validate_chats():
             return
