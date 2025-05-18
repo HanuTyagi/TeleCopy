@@ -29,7 +29,7 @@ def check_env_vars():
         for var in missing:
             value = input(f"Enter value for {var}: ")
             set_key(ENV_PATH, var, value)
-        print("✅ .env updated.")
+        print("\u2705 .env updated.")
         load_dotenv(ENV_PATH)
         print("Restart TeleCopy")
         exit()
@@ -67,10 +67,10 @@ def update_config():
             key = keys[int(choice) - 1]
             new_val = input(f"Enter new value for {key}: ").strip()
             set_key(ENV_PATH, key, new_val)
-            print(f"✅ {key} updated.")
-            print("🔁 Please restart the script to apply the new configuration(s).")
+            print(f"\u2705 {key} updated.")
+            print("\ud83d\udd01 Please restart the script to apply the new configuration(s).")
         except (IndexError, ValueError):
-            print("❌ Invalid selection.")
+            print("\u274c Invalid selection.")
 
 def list_chats(tg):
     result = tg.get_chats()
@@ -89,25 +89,27 @@ def set_source_and_destination(tg):
     dest = input("Enter destination chat ID: ")
     set_key(ENV_PATH, "SOURCE", source)
     set_key(ENV_PATH, "DESTINATION", dest)
-    print("✅ Source and Destination updated.")
+    print("\u2705 Source and Destination updated.")
 
-def copy_message(tg, from_chat_id, to_chat_id, message_id):
+def copy_message(tg, from_chat_id, to_chat_id, message_id, send_copy=True):
     data = {
         'chat_id': to_chat_id,
         'from_chat_id': from_chat_id,
         'message_ids': [message_id],
-        'send_copy': True,
+        'send_copy': send_copy,
     }
     while True:
         try:
             result = tg.call_method('forwardMessages', data, block=True)
+            if result.update["messages"] == [None]:
+                raise Exception(f"Message {message_id} could not be copied")
             return result
         except Exception as e:
             error_msg = str(e)
             match = re.search(r'flood_wait_(\d+)', error_msg)
             if match:
                 wait_time = int(match.group(1))
-                print(f"⏳ Rate limited by Telegram. Waiting {wait_time} seconds...")
+                print(f"\u23f3 Rate limited by Telegram. Waiting {wait_time} seconds...")
                 time.sleep(wait_time)
             else:
                 raise e
@@ -150,7 +152,7 @@ def custom_copy_messages(tg):
     src = os.getenv("SOURCE")
     dst = os.getenv("DESTINATION")
     if not src or not dst:
-        print("⚠️ SOURCE and DESTINATION must be set first. Please choose option 1 from the menu.")
+        print("\u26a0\ufe0f SOURCE and DESTINATION must be set first. Please choose option 1 from the menu.")
         return
     src = int(src)
     dst = int(dst)
@@ -180,7 +182,7 @@ def custom_copy_messages(tg):
     with open("message/message_copy_dict.pickle", "wb") as f:
         pickle.dump(copied, f)
 
-    print("✅ Custom copy complete.")
+    print("\u2705 Custom copy complete.")
 
 def copy_past_messages(tg):
     try:
@@ -211,7 +213,7 @@ def copy_past_messages(tg):
     with open("message/message_copy_dict.pickle", "wb") as f:
         pickle.dump(copied, f)
 
-    print("✅ Full copy complete.")
+    print("\u2705 Full copy complete.")
 
 def show_menu():
     tg = None
@@ -219,24 +221,16 @@ def show_menu():
 
     while True:
         os.system("clear" if os.name == "posix" else "cls")
-        print(r"""
- _________  _______   ___       _______   ________  ________  ________  ___    ___ 
-|\___   ___\\  ___ \ |\  \     |\  ___ \ |\   ____\\\   __  \|\   __  \|\  \  /  /|
-\|___ \  \_\ \   __/|\ \  \    \ \   __/|\ \  \___|\ \  \|\  \ \  \|\  \ \  \/  / /
-     \ \  \ \ \  \_|/_\ \  \    \ \  \_|/_\ \  \    \ \  \\\  \ \   ____\ \    / / 
-      \ \  \ \ \  \_|\ \ \  \____\ \  \_|\ \ \  \____\ \  \\\  \ \  \___|\/  /  /  
-       \ \__\ \ \_______\ \_______\ \_______\ \_______\ \_______\ \__\ __/  / /    
-        \|__|  \|___@H__|\|___AN__|\|___UT__|\|__YA___|\|___GI____|\|__||\___/ /     
-                                                                      \|___|/      
-========= TeleCopy Coded By HanuTyagi =========""")
-        print("0. Connect to Telegram")
-        print("1. Select source and destination")
-        print("2. Copy Past Messages (Full Clone)")
-        print("3. Start live monitoring (Auto-Forward)")
-        print("4. Custom Clone (by date)")
-        print("5. Update API ID, Hash, Phone")
-        print("6. Exit")
-
+        print("""
+========= TeleCopy =========
+0. Connect to Telegram
+1. Select source and destination
+2. Copy Past Messages (Full Clone)
+3. Start live monitoring (Auto-Forward)
+4. Custom Clone (by date)
+5. Update API ID, Hash, Phone
+6. Exit
+""")
         choice = input("Choose an option: ").strip()
 
         if choice == "0":
@@ -254,10 +248,10 @@ def show_menu():
             if (last.get("API_ID") != new_api_id or
                 last.get("API_HASH") != new_api_hash or
                 last.get("PHONE") != new_phone):
-                print("🔁 Detected config change – resetting session...")
+                print("\ud83d\udd01 Detected config change – resetting session...")
                 try:
                     shutil.rmtree('data')
-                except (FileNotFoundError):
+                except FileNotFoundError:
                     print("No Last Session Config Found")
 
             os.makedirs("data", exist_ok=True)
@@ -271,28 +265,26 @@ def show_menu():
             tg = initialize_telegram()
             tg.login()
             session_active = True
-            print("✅ Connected to Telegram.")
+            print("\u2705 Connected to Telegram.")
             time.sleep(2)
 
         elif choice == "5":
             update_config()
         elif choice == "6":
-            print("👋 Goodbye!")
+            print("\ud83d\udc4b Goodbye!")
             break
-
         elif not session_active:
-            print("❌ Please connect to Telegram first using option 0.")
+            print("\u274c Please connect to Telegram first using option 0.")
         elif choice == "1":
             set_source_and_destination(tg)
         elif choice == "2":
             copy_past_messages(tg)
         elif choice == "3":
-            monitor_live(tg)  # Assuming it's implemented elsewhere
+            print("Live monitor not yet implemented")
         elif choice == "4":
             custom_copy_messages(tg)
         else:
-            print("❌ Invalid choice.")
+            print("\u274c Invalid choice.")
 
 if __name__ == "__main__":
     show_menu()
-        
