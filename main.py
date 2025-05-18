@@ -29,7 +29,7 @@ def check_env_vars():
         for var in missing:
             value = input(f"Enter value for {var}: ")
             set_key(ENV_PATH, var, value)
-        print("\u2705 .env updated.")
+        print(".env updated.")
         load_dotenv(ENV_PATH)
         print("Restart TeleCopy")
         exit()
@@ -67,10 +67,10 @@ def update_config():
             key = keys[int(choice) - 1]
             new_val = input(f"Enter new value for {key}: ").strip()
             set_key(ENV_PATH, key, new_val)
-            print(f"\u2705 {key} updated.")
-            print("\ud83d\udd01 Please restart the script to apply the new configuration(s).")
+            print(f"{key} updated.")
+            print("Please restart the script to apply the new configuration(s).")
         except (IndexError, ValueError):
-            print("\u274c Invalid selection.")
+            print("Invalid selection.")
 
 def list_chats(tg):
     result = tg.get_chats()
@@ -89,7 +89,7 @@ def set_source_and_destination(tg):
     dest = input("Enter destination chat ID: ")
     set_key(ENV_PATH, "SOURCE", source)
     set_key(ENV_PATH, "DESTINATION", dest)
-    print("\u2705 Source and Destination updated.")
+    print("Source and Destination updated.")
 
 def copy_message(tg, from_chat_id, to_chat_id, message_id, send_copy=True):
     data = {
@@ -109,7 +109,7 @@ def copy_message(tg, from_chat_id, to_chat_id, message_id, send_copy=True):
             match = re.search(r'flood_wait_(\d+)', error_msg)
             if match:
                 wait_time = int(match.group(1))
-                print(f"\u23f3 Rate limited by Telegram. Waiting {wait_time} seconds...")
+                print(f"Rate limited by Telegram. Waiting {wait_time} seconds...")
                 time.sleep(wait_time)
             else:
                 raise e
@@ -152,7 +152,7 @@ def custom_copy_messages(tg):
     src = os.getenv("SOURCE")
     dst = os.getenv("DESTINATION")
     if not src or not dst:
-        print("\u26a0\ufe0f SOURCE and DESTINATION must be set first. Please choose option 1 from the menu.")
+        print("SOURCE and DESTINATION must be set first. Please choose option 1 from the menu.")
         return
     src = int(src)
     dst = int(dst)
@@ -182,7 +182,7 @@ def custom_copy_messages(tg):
     with open("message/message_copy_dict.pickle", "wb") as f:
         pickle.dump(copied, f)
 
-    print("\u2705 Custom copy complete.")
+    print("Custom copy complete.")
 
 def copy_past_messages(tg):
     try:
@@ -213,7 +213,7 @@ def copy_past_messages(tg):
     with open("message/message_copy_dict.pickle", "wb") as f:
         pickle.dump(copied, f)
 
-    print("\u2705 Full copy complete.")
+    print("Full copy complete.")
 
 def show_menu():
     tg = None
@@ -248,7 +248,7 @@ def show_menu():
             if (last.get("API_ID") != new_api_id or
                 last.get("API_HASH") != new_api_hash or
                 last.get("PHONE") != new_phone):
-                print("\ud83d\udd01 Detected config change – resetting session...")
+                print("Detected config change – resetting session...")
                 try:
                     shutil.rmtree('data')
                 except FileNotFoundError:
@@ -265,16 +265,16 @@ def show_menu():
             tg = initialize_telegram()
             tg.login()
             session_active = True
-            print("\u2705 Connected to Telegram.")
+            print("Connected to Telegram.")
             time.sleep(2)
 
         elif choice == "5":
             update_config()
         elif choice == "6":
-            print("\ud83d\udc4b Goodbye!")
+            print("Goodbye!")
             break
         elif not session_active:
-            print("\u274c Please connect to Telegram first using option 0.")
+            print("Please connect to Telegram first using option 0.")
         elif choice == "1":
             set_source_and_destination(tg)
         elif choice == "2":
@@ -284,7 +284,7 @@ def show_menu():
         elif choice == "4":
             custom_copy_messages(tg)
         else:
-            print("\u274c Invalid choice.")
+            print("Invalid choice.")
 
 if __name__ == "__main__":
     show_menu()
