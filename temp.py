@@ -1,222 +1,330 @@
 import os
-import json
-import time
+import sys
+import subprocess
 import shutil
-import datetime
-from telethon import TelegramClient, events, sync
-from telethon.tl.types import MessageMediaPoll
-from telethon.tl.functions.messages import GetHistoryRequest
+import pickle
+import threading
+import time
+import re
+from datetime import datetime
+from dotenv import load_dotenv, set_key, find_dotenv
+from telegram.client import Telegram
 
-# Helper function to load environment variables from a file
-def load_env(filename):
-    if not os.path.exists(filename):
-        return
-    with open(filename, 'r') as f:
-        for line in f:
-            if line.strip() and not line.startswith('#'):
-                key, val = line.strip().split('=', 1)
-                os.environ[key] = val
+load_dotenv(find_dotenv())
+ENV_PATH = find_dotenv()
 
-# Helper function to get a valid integer input
-def get_valid_int(prompt):
+EXCLUDE_TYPES = [
+    "messageChatChangePhoto", 
+    "messageChatChangeTitle", 
+    "messageBasicGroupChatCreate",
+    "messageChatDeleteMember",
+    "messageChatAddMembers",
+]
+
+def check_env_vars():
+    required = ["PHONE", "API_ID", "API_HASH"]
+    missing = [var for var in required if not os.getenv(var)]
+    if missing:
+        print(f"Missing env values: {missing}")
+        for var in missing:
+            value = input(f"Enter value for {var}: ")
+            set_key(ENV_PATH, var, value)
+        print(".env updated.")
+        load_dotenv(ENV_PATH)
+        print("Restart TeleCopy")
+        exit()
+
+def initialize_telegram():
+    return Telegram(
+        api_id=os.getenv("API_ID"),
+        api_hash=os.getenv("API_HASH"),
+        phone=os.getenv("PHONE"),
+        database_encryption_key=os.getenv("DB_PASSWORD"),
+        files_directory=os.getenv("FILES_DIRECTORY"),
+        proxy_server=os.getenv("PROXY_SERVER"),
+        proxy_port=os.getenv("PROXY_PORT"),
+        proxy_type={"@type": os.getenv("PROXY_TYPE")} if os.getenv("PROXY_TYPE") else None,
+    )
+
+def update_config():
+    current = {
+        "PHONE": os.getenv("PHONE", "Not Set"),
+        "API_ID": os.getenv("API_ID", "Not Set"),
+        "API_HASH": os.getenv("API_HASH", "Not Set")
+    }
+    print("\nCurrent Configuration:")
+    for idx, (key, val) in enumerate(current.items(), start=1):
+        print(f"{idx}. {key}: {val}")
+    choice = -1
+    print("0. Return to main menu")
+    while choice != 0:
+        choice = input("Select which one to update (1-3): ").strip()
+        if choice == "0":
+            python = sys.executable
+            os.execl(python, python, *sys.argv)
+        keys = list(current.keys())
+        try:
+            key = keys[int(choice) - 1]
+            new_val = input(f"Enter new value for {key}: ").strip()
+            set_key(ENV_PATH, key, new_val)
+            print(f"{key} updated.")
+            print("Please restart the script to apply the new configuration(s).")
+        except (IndexError, ValueError):
+            print("Invalid selection.")
+
+def list_chats(tg):
+    result = tg.get_chats()
+    result.wait()
+    chats = result.update['chat_ids']
+    print("\nAvailable Chats:")
+    for chat_id in chats:
+        r = tg.get_chat(chat_id)
+        r.wait()
+        title = r.update.get('title', 'Private Chat')
+        print(f"Chat ID: {chat_id}, Title: {title}")
+
+def set_source_and_destination(tg):
+    list_chats(tg)
+    source = input("Enter source chat ID: ")
+    dest = input("Enter destination chat ID: ")
+    set_key(ENV_PATH, "SOURCE", source)
+    set_key(ENV_PATH, "DESTINATION", dest)
+    print("Source and Destination updated.")
+
+def copy_message(tg, from_chat_id, to_chat_id, message_id, send_copy=True):
+    data = {
+        'chat_id': to_chat_id,
+        'from_chat_id': from_chat_id,
+        'message_ids': [message_id],
+        'send_copy': send_copy,
+    }
     while True:
-        val = input(prompt).strip()
-        if val.isdigit():
-            return int(val)
-        print("Invalid input. Please enter a valid number.")
+        try:
+            result = tg.call_method('forwardMessages', data, block=True)
+            if result.update["messages"] == [None]:
+                raise Exception(f"Message {message_id} could not be copied")
+            return result
+        except Exception as e:
+            error_msg = str(e)
+            match = re.search(r'flood_wait_(\d+)', error_msg)
+            if match:
+                wait_time = int(match.group(1))
+                print(f"Rate limited by Telegram. Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                raise e
 
-# Helper function to create a new .env file
-def create_env_file(filename):
-    print("Creating new .env file...")
-    api_id = get_valid_int("Enter your API ID: ")
-    api_hash = input("Enter your API Hash: ").strip()
-    session_name = input("Enter your session name: ").strip()
+def get_all_messages(tg, chat_id):
+    messages = []
+    last = 0
+    while True:
+        r = tg.get_chat_history(chat_id, limit=100, from_message_id=last)
+        r.wait()
+        if not r.update["messages"]:
+            break
+        messages.extend(r.update["messages"])
+        last = r.update["messages"][-1]["id"]
+    return messages
 
-    with open(filename, 'w') as f:
-        f.write(f"API_ID={api_id}\n")
-        f.write(f"API_HASH={api_hash}\n")
-        f.write(f"SESSION_NAME={session_name}\n")
+def filter_messages_by_date(messages, from_date=None, to_date=None):
+    def to_timestamp(date_str):
+        return int(datetime.strptime(date_str, "%Y-%m-%d").timestamp()) if date_str else None
 
-# Helper function to reset credentials
-def reset_credentials():
-    backup = ".env.backup"
-    if os.path.exists(".env"):
-        shutil.copy(".env", backup)
-    os.remove(".env")
-    create_env_file(".env")
-    print("Credentials reset. Please restart the script.")
+    from_ts = to_timestamp(from_date)
+    to_ts = to_timestamp(to_date)
 
-# Load or create .env file
-if not os.path.exists(".env"):
-    create_env_file(".env")
+    filtered = []
+    for m in messages:
+        msg_ts = m["date"]
+        if ((from_ts is None or msg_ts >= from_ts) and
+            (to_ts is None or msg_ts <= to_ts)):
+            if m["content"]["@type"] not in EXCLUDE_TYPES:
+                filtered.append(m)
+    return filtered
 
-load_env(".env")
+def custom_copy_messages(tg):
+    try:
+        with open("message/message_copy_dict.pickle", "rb") as f:
+            copied = pickle.load(f)
+    except OSError:
+        copied = {}
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-SESSION_NAME = os.getenv("SESSION_NAME")
+    src = os.getenv("SOURCE")
+    dst = os.getenv("DESTINATION")
+    if not src or not dst:
+        print("SOURCE and DESTINATION must be set first. Please choose option 1 from the menu.")
+        return
+    src = int(src)
+    dst = int(dst)
 
-client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-client.start()
+    print("Enter the date range for copying messages:")
+    from_date = input("From date (YYYY-MM-DD) [leave empty to copy from start]: ").strip()
+    to_date = input("To date (YYYY-MM-DD) [leave empty to copy till latest]: ").strip()
 
-# Global state
-copied_message_ids = set()
+    all_messages = get_all_messages(tg, src)
+    messages_to_copy = filter_messages_by_date(all_messages, from_date, to_date)
 
-# Helper function to choose chat
-async def choose_chat():
-    dialogs = await client.get_dialogs()
-    print("\nAvailable chats:")
-    for i, dialog in enumerate(dialogs):
-        name = dialog.name or dialog.entity.username or str(dialog.id)
-        print(f"{i+1}. {name}")
-    index = get_valid_int("\nSelect a chat by number: ") - 1
-    return dialogs[index].entity
-
-# Helper to check if a message is a poll
-def is_poll(message):
-    return isinstance(message.media, MessageMediaPoll)
-
-# Helper to export messages
-async def export_messages(entity, messages, filename):
-    data = []
-    for message in messages:
-        if message.id in copied_message_ids:
+    print(f"Copying {len(messages_to_copy)} messages from {from_date or 'beginning'} to {to_date or 'latest'}...")
+    for m in reversed(messages_to_copy):
+        mid = m["id"]
+        if mid in copied:
             continue
-        copied_message_ids.add(message.id)
+        try:
+            result = copy_message(tg, src, dst, mid)
+            new_id = result.update["messages"][0]["id"]
+            copied[mid] = new_id
+            print(f"Copied {mid} -> {new_id}")
+        except Exception as e:
+            print(f"Error copying message {mid}: {e}")
+            continue
 
-        if message.media and not is_poll(message):
-            file_path = await message.download_media()
-            data.append({"id": message.id, "text": message.text, "file": file_path})
-        elif is_poll(message):
-            data.append({"id": message.id, "poll": message.media.poll.question})
-        else:
-            data.append({"id": message.id, "text": message.text})
+    os.makedirs("message", exist_ok=True)
+    with open("message/message_copy_dict.pickle", "wb") as f:
+        pickle.dump(copied, f)
 
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    print("Custom copy complete.")
 
-    print(f"Exported {len(data)} messages to {filename}")
+def copy_past_messages(tg):
+    try:
+        with open("message/message_copy_dict.pickle", "rb") as f:
+            copied = pickle.load(f)
+    except OSError:
+        copied = {}
 
-# Helper to import messages
-async def import_messages(target, filename):
-    if not os.path.exists(filename):
-        print("File not found.")
-        return
+    src = int(os.getenv("SOURCE"))
+    dst = int(os.getenv("DESTINATION"))
 
-    with open(filename, 'r', encoding='utf-8') as f:
-        messages = json.load(f)
+    all_messages = get_all_messages(tg, src)
+    print(f"Copying {len(all_messages)} messages...")
+    for m in reversed(all_messages):
+        mid = m["id"]
+        if mid in copied:
+            continue
+        try:
+            result = copy_message(tg, src, dst, mid)
+            new_id = result.update["messages"][0]["id"]
+            copied[mid] = new_id
+            print(f"Copied {mid} -> {new_id}")
+        except Exception as e:
+            print(f"Error copying message {mid}: {e}")
+            continue
 
-    for msg in messages:
-        if "file" in msg:
-            await client.send_file(target, msg["file"], caption=msg.get("text", ""))
-        elif "poll" in msg:
-            print("Skipping poll message.")
-        else:
-            await client.send_message(target, msg.get("text", ""))
-        time.sleep(0.5)
+    os.makedirs("message", exist_ok=True)
+    with open("message/message_copy_dict.pickle", "wb") as f:
+        pickle.dump(copied, f)
 
-    print(f"Imported {len(messages)} messages to {target.title}")
+    print("Full copy complete.")
 
-# Helper to copy messages in date range
-async def copy_messages_by_date(source, target):
-    from_date = datetime.datetime.strptime(input("Enter FROM date (YYYY-MM-DD): "), "%Y-%m-%d")
-    to_date = datetime.datetime.strptime(input("Enter TO date (YYYY-MM-DD): "), "%Y-%m-%d")
-    all_messages = []
-    offset_id = 0
-    limit = 100
+def start_live_monitoring(tg):
+    src = int(os.getenv("SOURCE"))
+    dst = int(os.getenv("DESTINATION"))
 
+    try:
+        with open("message/message_copy_dict.pickle", "rb") as f:
+            copied = pickle.load(f)
+    except OSError:
+        copied = {}
+
+    def handle_update(update):
+        if update['@type'] == 'updateNewMessage':
+            message = update['message']
+            if message['chat_id'] != src:
+                return
+            mid = message['id']
+            if mid in copied:
+                return
+            if message["content"]["@type"] in EXCLUDE_TYPES:
+                return
+            try:
+                result = copy_message(tg, src, dst, mid)
+                new_id = result.update["messages"][0]["id"]
+                copied[mid] = new_id
+                print(f"Live copied {mid} -> {new_id}")
+                with open("message/message_copy_dict.pickle", "wb") as f:
+                    pickle.dump(copied, f)
+            except Exception as e:
+                print(f"Live monitor error copying message {mid}: {e}")
+
+    print("Starting live monitor... Press Ctrl+C to stop.")
+    tg.add_update_handler(handle_update)
     while True:
-        history = await client(GetHistoryRequest(
-            peer=source,
-            offset_id=offset_id,
-            offset_date=None,
-            add_offset=0,
-            limit=limit,
-            max_id=0,
-            min_id=0,
-            hash=0
-        ))
-        messages = history.messages
-        if not messages:
+        try:
+            time.sleep(1)
+        except KeyboardInterrupt:
+            print("Stopping live monitoring.")
             break
 
-        for msg in messages:
-            if msg.date.replace(tzinfo=None) < from_date:
-                break
-            if from_date <= msg.date.replace(tzinfo=None) <= to_date:
-                all_messages.append(msg)
+def show_menu():
+    tg = None
+    session_active = False
 
-        offset_id = messages[-1].id
-        if messages[-1].date.replace(tzinfo=None) < from_date:
-            break
-
-    await export_messages(source, all_messages, "temp_messages.json")
-    await import_messages(target, "temp_messages.json")
-    os.remove("temp_messages.json")
-
-# Live monitor
-async def live_monitor(source, target):
-    @client.on(events.NewMessage(chats=source))
-    async def handler(event):
-        message = event.message
-        if message.id in copied_message_ids:
-            return
-        copied_message_ids.add(message.id)
-        if message.media and not is_poll(message):
-            file_path = await message.download_media()
-            await client.send_file(target, file_path, caption=message.text)
-        elif is_poll(message):
-            print("Skipping poll message.")
-        else:
-            await client.send_message(target, message.text)
-
-    print("Live monitoring started. Press Ctrl+C to stop.")
-    await client.run_until_disconnected()
-
-# Main menu
-async def main():
     while True:
-        print("\nMain Menu")
-        print("1. Connect to Telegram")
-        print("2. Reset credentials")
-        print("3. Copy messages between chats")
-        print("4. Copy messages in date range")
-        print("5. Live monitor messages")
-        print("6. Exit")
+        os.system("clear" if os.name == "posix" else "cls")
+        print("""
+========= TeleCopy =========
+0. Connect to Telegram
+1. Select source and destination
+2. Copy Past Messages (Full Clone)
+3. Start live monitoring (Auto-Forward)
+4. Custom Clone (by date)
+5. Update API ID, Hash, Phone
+6. Exit
+""")
         choice = input("Choose an option: ").strip()
 
-        if choice == '1':
-            print("Connected.")
-        elif choice == '2':
-            reset_credentials()
+        if choice == "0":
+            check_env_vars()
+            new_api_id = os.getenv("API_ID")
+            new_api_hash = os.getenv("API_HASH")
+            new_phone = os.getenv("PHONE")
+
+            try:
+                with open("data/last_session_config.pickle", "rb") as f:
+                    last = pickle.load(f)
+            except FileNotFoundError:
+                last = {}
+
+            if (last.get("API_ID") != new_api_id or
+                last.get("API_HASH") != new_api_hash or
+                last.get("PHONE") != new_phone):
+                print("Detected config change – resetting session...")
+                try:
+                    shutil.rmtree('data')
+                except FileNotFoundError:
+                    print("No Last Session Config Found")
+
+            os.makedirs("data", exist_ok=True)
+            with open("data/last_session_config.pickle", "wb") as f:
+                pickle.dump({
+                    "API_ID": new_api_id,
+                    "API_HASH": new_api_hash,
+                    "PHONE": new_phone
+                }, f)
+
+            tg = initialize_telegram()
+            tg.login()
+            session_active = True
+            print("Connected to Telegram.")
+            time.sleep(2)
+
+        elif choice == "5":
+            update_config()
+        elif choice == "6":
+            print("Goodbye!")
             break
-        elif choice == '3':
-            print("Select source chat:")
-            source = await choose_chat()
-            print("Select target chat:")
-            target = await choose_chat()
-            all_msgs = await client.get_messages(source, limit=200)
-            await export_messages(source, all_msgs, "temp_messages.json")
-            await import_messages(target, "temp_messages.json")
-            os.remove("temp_messages.json")
-        elif choice == '4':
-            print("Select source chat:")
-            source = await choose_chat()
-            print("Select target chat:")
-            target = await choose_chat()
-            await copy_messages_by_date(source, target)
-        elif choice == '5':
-            print("Select source chat:")
-            source = await choose_chat()
-            print("Select target chat:")
-            target = await choose_chat()
-            await live_monitor(source, target)
-        elif choice == '6':
-            break
+        elif not session_active:
+            print("Please connect to Telegram first using option 0.")
+        elif choice == "1":
+            set_source_and_destination(tg)
+        elif choice == "2":
+            copy_past_messages(tg)
+        elif choice == "3":
+            start_live_monitoring(tg)
+        elif choice == "4":
+            custom_copy_messages(tg)
         else:
             print("Invalid choice.")
 
-if __name__ == '__main__':
-    with client:
-        client.loop.run_until_complete(main())
-  
+if __name__ == "__main__":
+    show_menu()
+    
