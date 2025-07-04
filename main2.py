@@ -179,6 +179,41 @@ class TeleCopy:
         to_ts = datetime.strptime(to_date, "%Y-%m-%d").timestamp()
         return [m for m in messages if from_ts <= m['date'] <= to_ts]
 
+    def copy_message(self, src, dest, msg_id):
+        """Forward a message from source to destination"""
+        try:
+            data = {
+                'chat_id': dest,
+                'from_chat_id': src,
+                'message_ids': [msg_id],
+                'send_copy': True
+            }
+            result = self.tg.call_method('forwardMessages', data, block=True)
+            if result.update["messages"] == [None]:
+                print(f"Error copying message {msg_id}")
+                return None
+            return result.update["messages"][0]["id"]
+        except Exception as e:
+            print(f"Error forwarding message {msg_id}: {e}")
+            return None
+
+    def get_messages(self, chat_id):
+        """Fetch messages from a given chat"""
+        messages = []
+        last = self.last_message_id
+        while True:
+            try:
+                result = self.tg.get_chat_history(chat_id, limit=100, from_message_id=last)
+                result.wait()
+                if not result.update["messages"]:
+                    break
+                messages.extend(result.update["messages"])
+                last = result.update["messages"][-1]["id"]
+            except Exception as e:
+                print(f"Error fetching messages: {e}")
+                break
+        return messages
+
     def advanced_menu(self):
         """Show advanced settings"""
         print("\nAdvanced Settings:")
@@ -203,6 +238,35 @@ class TeleCopy:
             self.tg.stop()
         print("\n👋 Goodbye!")
         sys.exit(0)
+
+    def show_menu(self):
+        """Main menu for the program"""
+        while True:
+            print("""
+========= TeleCopy =========
+0. Connect to Telegram
+1. Set Source and Destination Chats
+2. Copy Full History
+3. Copy Messages by Date Range
+4. Advanced Settings
+5. Exit
+""")
+            choice = input("Choose an option: ").strip()
+
+            if choice == "0":
+                self.handle_connection()
+            elif choice == "1":
+                self.set_chats()
+            elif choice == "2":
+                self.full_copy()
+            elif choice == "3":
+                self.date_copy()
+            elif choice == "4":
+                self.advanced_menu()
+            elif choice == "5":
+                self.clean_exit()
+            else:
+                print("Invalid choice. Please select again.")
 
 if __name__ == "__main__":
     tc = TeleCopy()
