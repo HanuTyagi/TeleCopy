@@ -98,7 +98,8 @@ def copy_message(tg, from_chat_id, to_chat_id, message_id, send_copy=True):
         'message_ids': [message_id],
         'send_copy': send_copy,
     }
-    while True:
+    retries = 5  # Retry 5 times if necessary
+    while retries > 0:
         try:
             result = tg.call_method('forwardMessages', data, block=True)
             if result.update["messages"] == [None]:
@@ -111,8 +112,15 @@ def copy_message(tg, from_chat_id, to_chat_id, message_id, send_copy=True):
                 wait_time = int(match.group(1))
                 print(f"Rate limited by Telegram. Waiting {wait_time} seconds...")
                 time.sleep(wait_time)
+            elif "FloodWait" in error_msg:
+                print("Rate limit hit. Retrying...")
+                time.sleep(5)  # Retry after 5 seconds if not explicitly flooded
             else:
-                raise e
+                print(f"Error copying message {message_id}: {e}")
+                retries -= 1
+                if retries == 0:
+                    print(f"Failed to copy message {message_id} after several retries.")
+                continue
 
 def get_all_messages(tg, chat_id):
     messages = []
