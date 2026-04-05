@@ -1,0 +1,20 @@
+# Environment / secrets
+.env
+
+# Runtime state
+data/
+message/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# TDLib session
+tdlib-session/

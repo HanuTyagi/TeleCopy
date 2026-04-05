@@ -1,16 +1,14 @@
 import os
 import sys
 import shutil
-import pickle
+import json
 import threading
 import time
 import re
-import json
 from datetime import datetime
 from dotenv import load_dotenv, set_key, find_dotenv
 from telegram.client import Telegram
 from tqdm import tqdm
-from backoff import on_exception, expo
 
 EXCLUDE_TYPES = [
     "messageChatChangePhoto", "messageChatChangeTitle",
@@ -37,9 +35,9 @@ class TeleCopy:
         load_dotenv(self.config_path)
         os.makedirs('data', exist_ok=True)
         try:
-            with open('data/last_message.pkl', 'rb') as f:
-                self.last_message_id = pickle.load(f)
-        except (FileNotFoundError, EOFError):
+            with open('data/last_message.json') as f:
+                self.last_message_id = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
             self.last_message_id = 0
 
     def check_env_vars(self):
@@ -70,9 +68,9 @@ class TeleCopy:
         """Handle Telegram connection setup"""
         self.check_env_vars()
         try:
-            with open("data/last_session_config.pickle", "rb") as f:
-                last = pickle.load(f)
-        except FileNotFoundError:
+            with open("data/last_session_config.json") as f:
+                last = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
             last = {}
 
         if (last.get("API_ID") != os.getenv("API_ID") or
@@ -85,8 +83,8 @@ class TeleCopy:
                 pass
 
         os.makedirs("data", exist_ok=True)
-        with open("data/last_session_config.pickle", "wb") as f:
-            pickle.dump({
+        with open("data/last_session_config.json", "w") as f:
+            json.dump({
                 "API_ID": os.getenv("API_ID"),
                 "API_HASH": os.getenv("API_HASH"),
                 "PHONE": os.getenv("PHONE")
@@ -137,15 +135,15 @@ class TeleCopy:
     def load_copy_map(self):
         """Load message ID mapping"""
         try:
-            with open("data/copy_map.pkl", "rb") as f:
-                return pickle.load(f)
-        except FileNotFoundError:
+            with open("data/copy_map.json") as f:
+                return {int(k): v for k, v in json.load(f).items()}
+        except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
     def save_copy_map(self, data):
         """Save message ID mapping"""
-        with open("data/copy_map.pkl", "wb") as f:
-            pickle.dump(data, f)
+        with open("data/copy_map.json", "w") as f:
+            json.dump(data, f)
 
     def date_copy(self):
         """Copy messages within date range"""
@@ -181,21 +179,35 @@ class TeleCopy:
 
     def copy_message(self, src, dest, msg_id):
         """Forward a message from source to destination"""
-        try:
-            data = {
-                'chat_id': dest,
-                'from_chat_id': src,
-                'message_ids': [msg_id],
-                'send_copy': True
-            }
-            result = self.tg.call_method('forwardMessages', data, block=True)
-            if result.update["messages"] == [None]:
-                print(f"Error copying message {msg_id}")
-                return None
-            return result.update["messages"][0]["id"]
-        except Exception as e:
-            print(f"Error forwarding message {msg_id}: {e}")
-            return None
+        data = {
+            'chat_id': dest,
+            'from_chat_id': src,
+            'message_ids': [msg_id],
+            'send_copy': True
+        }
+        MAX_RETRIES = 5
+        for attempt in range(MAX_RETRIES):
+            try:
+                result = self.tg.call_method('forwardMessages', data, block=True)
+                if result.update["messages"] == [None]:
+                    raise Exception(f"Message {msg_id} could not be copied")
+                return result.update["messages"][0]["id"]
+            except Exception as e:
+                error_msg = str(e)
+                match = re.search(r'flood_wait_(\d+)', error_msg)
+                if match:
+                    wait_time = int(match.group(1))
+                    print(f"Rate limited by Telegram. Waiting {wait_time} seconds...")
+                    time.sleep(wait_time)
+                elif "FloodWait" in error_msg:
+                    wait_time = 5 * (attempt + 1)
+                    print(f"Rate limit hit. Waiting {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"Error forwarding message {msg_id}: {e}")
+        else:
+            print(f"Failed to copy message {msg_id} after {MAX_RETRIES} retries.")
+        return None
 
     def get_messages(self, chat_id):
         """Fetch messages from a given chat"""
@@ -223,8 +235,11 @@ class TeleCopy:
         choice = input("Select: ")
         
         if choice == "1":
-            os.remove("data/copy_map.pkl")
-            print("✅ Copy history cleared.")
+            try:
+                os.remove("data/copy_map.json")
+                print("✅ Copy history cleared.")
+            except FileNotFoundError:
+                print("No copy history found.")
         elif choice == "2":
             shutil.rmtree('tdlib-session')
             print("✅ Session data reset.")

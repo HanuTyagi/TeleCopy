@@ -1,8 +1,7 @@
 import os
 import sys
-import subprocess
 import shutil
-import pickle
+import json
 import threading
 import time
 import re
@@ -98,8 +97,8 @@ def copy_message(tg, from_chat_id, to_chat_id, message_id, send_copy=True):
         'message_ids': [message_id],
         'send_copy': send_copy,
     }
-    retries = 5  # Retry 5 times if necessary
-    while retries > 0:
+    MAX_RETRIES = 5
+    for attempt in range(MAX_RETRIES):
         try:
             result = tg.call_method('forwardMessages', data, block=True)
             if result.update["messages"] == [None]:
@@ -113,14 +112,14 @@ def copy_message(tg, from_chat_id, to_chat_id, message_id, send_copy=True):
                 print(f"Rate limited by Telegram. Waiting {wait_time} seconds...")
                 time.sleep(wait_time)
             elif "FloodWait" in error_msg:
-                print("Rate limit hit. Retrying...")
-                time.sleep(5)  # Retry after 5 seconds if not explicitly flooded
+                wait_time = 5 * (attempt + 1)
+                print(f"Rate limit hit. Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
             else:
                 print(f"Error copying message {message_id}: {e}")
-                retries -= 1
-                if retries == 0:
-                    print(f"Failed to copy message {message_id} after several retries.")
-                continue
+    else:
+        print(f"Failed to copy message {message_id} after {MAX_RETRIES} retries.")
+    return None
 
 def get_all_messages(tg, chat_id):
     messages = []
@@ -150,12 +149,20 @@ def filter_messages_by_date(messages, from_date=None, to_date=None):
                 filtered.append(m)
     return filtered
 
-def custom_copy_messages(tg):
+def load_copy_map():
     try:
-        with open("message/message_copy_dict.pickle", "rb") as f:
-            copied = pickle.load(f)
-    except OSError:
-        copied = {}
+        with open("data/copy_map.json") as f:
+            return {int(k): v for k, v in json.load(f).items()}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_copy_map(data):
+    os.makedirs("data", exist_ok=True)
+    with open("data/copy_map.json", "w") as f:
+        json.dump(data, f)
+
+def custom_copy_messages(tg):
+    copied = load_copy_map()
 
     src = os.getenv("SOURCE")
     dst = os.getenv("DESTINATION")
@@ -170,37 +177,32 @@ def custom_copy_messages(tg):
     to_date = input("To date (YYYY-MM-DD) [leave empty to copy till latest]: ").strip()
 
     all_messages = get_all_messages(tg, src)
-    messages_to_copy = filter_messages_by_date(all_messages, from_date, to_date)
+    messages_to_copy = filter_messages_by_date(all_messages, from_date if from_date else None, to_date if to_date else None)
 
     print(f"Copying {len(messages_to_copy)} messages from {from_date or 'beginning'} to {to_date or 'latest'}...")
     for m in reversed(messages_to_copy):
         mid = m["id"]
         if mid in copied:
             continue
-        try:
-            result = copy_message(tg, src, dst, mid)
+        result = copy_message(tg, src, dst, mid)
+        if result is not None:
             new_id = result.update["messages"][0]["id"]
             copied[mid] = new_id
+            save_copy_map(copied)
             print(f"Copied {mid} -> {new_id}")
-        except Exception as e:
-            print(f"Error copying message {mid}: {e}")
-            continue
-
-    os.makedirs("message", exist_ok=True)
-    with open("message/message_copy_dict.pickle", "wb") as f:
-        pickle.dump(copied, f)
 
     print("Custom copy complete.")
 
 def copy_past_messages(tg):
-    try:
-        with open("message/message_copy_dict.pickle", "rb") as f:
-            copied = pickle.load(f)
-    except OSError:
-        copied = {}
+    src = os.getenv("SOURCE")
+    dst = os.getenv("DESTINATION")
+    if not src or not dst:
+        print("SOURCE and DESTINATION must be set first. Please choose option 1 from the menu.")
+        return
+    src = int(src)
+    dst = int(dst)
 
-    src = int(os.getenv("SOURCE"))
-    dst = int(os.getenv("DESTINATION"))
+    copied = load_copy_map()
 
     all_messages = get_all_messages(tg, src)
     print(f"Copying {len(all_messages)} messages...")
@@ -208,20 +210,53 @@ def copy_past_messages(tg):
         mid = m["id"]
         if mid in copied:
             continue
-        try:
-            result = copy_message(tg, src, dst, mid)
+        result = copy_message(tg, src, dst, mid)
+        if result is not None:
             new_id = result.update["messages"][0]["id"]
             copied[mid] = new_id
+            save_copy_map(copied)
             print(f"Copied {mid} -> {new_id}")
-        except Exception as e:
-            print(f"Error copying message {mid}: {e}")
-            continue
-
-    os.makedirs("message", exist_ok=True)
-    with open("message/message_copy_dict.pickle", "wb") as f:
-        pickle.dump(copied, f)
 
     print("Full copy complete.")
+
+def start_live_monitoring(tg):
+    src = os.getenv("SOURCE")
+    dst = os.getenv("DESTINATION")
+    if not src or not dst:
+        print("SOURCE and DESTINATION must be set first. Please choose option 1 from the menu.")
+        return
+    src = int(src)
+    dst = int(dst)
+
+    copied = load_copy_map()
+    lock = threading.Lock()
+
+    def handle_update(update):
+        if update['@type'] == 'updateNewMessage':
+            message = update['message']
+            if message['chat_id'] != src:
+                return
+            mid = message['id']
+            with lock:
+                if mid in copied:
+                    return
+            if message.get("content", {}).get("@type") in EXCLUDE_TYPES:
+                return
+            result = copy_message(tg, src, dst, mid)
+            if result is not None:
+                new_id = result.update["messages"][0]["id"]
+                with lock:
+                    copied[mid] = new_id
+                    save_copy_map(copied)
+                print(f"Live copied {mid} -> {new_id}")
+
+    print("Starting live monitor... Press Ctrl+C to stop.")
+    tg.add_update_handler(handle_update)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Stopping live monitoring.")
 
 def show_menu():
     tg = None
@@ -248,9 +283,9 @@ def show_menu():
             new_phone = os.getenv("PHONE")
 
             try:
-                with open("data/last_session_config.pickle", "rb") as f:
-                    last = pickle.load(f)
-            except FileNotFoundError:
+                with open("data/last_session_config.json") as f:
+                    last = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
                 last = {}
 
             if (last.get("API_ID") != new_api_id or
@@ -263,8 +298,8 @@ def show_menu():
                     print("No Last Session Config Found")
 
             os.makedirs("data", exist_ok=True)
-            with open("data/last_session_config.pickle", "wb") as f:
-                pickle.dump({
+            with open("data/last_session_config.json", "w") as f:
+                json.dump({
                     "API_ID": new_api_id,
                     "API_HASH": new_api_hash,
                     "PHONE": new_phone
@@ -288,7 +323,7 @@ def show_menu():
         elif choice == "2":
             copy_past_messages(tg)
         elif choice == "3":
-            print("Live monitor not yet implemented")
+            start_live_monitoring(tg)
         elif choice == "4":
             custom_copy_messages(tg)
         else:
