@@ -14,19 +14,21 @@
         \|__|  \|_______|\|_______|\|_______|\|_______|\|_______|\|__||\___/ /     
                                                                       \|___|/      
                                                                                    By HanuTyagi
-```                                                                                                         
+```
 
 
 
 ## 🔧 Features
 
-- 📤 Copy **Past Messages** from One Telegram chat to Another
-- 📅 **Custom Date-Range** filtering for selective cloning
-- 🔄 **Live Forwarding** of messages as they Arrive
-- ⚙️ Interactive **Menu System** for Configuration and Actions
+- 📤 Copy **Past Messages** from one Telegram chat to another
+- 📅 **Custom date-range** filtering for selective cloning
+- 🔄 **Live Forwarding** of messages as they arrive
+- ⚙️ Interactive **menu system** for configuration and actions
 - 📁 Supports all media types and polls
-- 💾 Automatically tracks Copied messages to avoid Duplicates
-- 🧼 Resets session when API ID / Phone changes
+- 💾 Automatically tracks copied messages to avoid duplicates
+- 🧼 Resets session when API credentials change
+- 📝 Structured logging to console and `telecopy.log`
+- 🔁 Automatic retry with FloodWait handling and exponential back-off
 
 
 ---
@@ -54,62 +56,90 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 5. Start TeleCopy
+### 5. Configure Environment Variables
+Copy `.env.example` to `.env` and fill in your credentials:
+```bash
+cp .env.example .env
+```
+Or simply run the script — it will prompt you for any missing values on first launch.
+
+### 6. Start TeleCopy
 ```bash
 python main.py
 ```
 
-### 6. Set Environment Variables
-``` Simply run the script and it will prompt for missing values interactively.```
-
 ---
 
 ### Note
-For ```TeleCopy``` to work, You'll need an ```API_ID``` and ```API_HASH```.
+For `TeleCopy` to work, you need an `API_ID` and `API_HASH`.
 
-You can get your own ```API_ID``` and ```API_HASH``` on this [Link](https://my.telegram.org/auth?to=apps)
+You can get your own `API_ID` and `API_HASH` at [my.telegram.org/apps](https://my.telegram.org/auth?to=apps).
 
-Simply Login with your ```Telegram``` number, and then chose an app name of your chose and a URL.
+Log in with your Telegram number, choose an app name, and copy the credentials into `.env`.
 
-Also, When using ```TeleCopy```, Make sure that you enter the Phone number with your countries' Phone code
+Also, when setting `PHONE`, include your country code (e.g. `+12025551234`).
 
 ---
 #### 🔎 Restarting Instructions
-Each time you restart the Terminal, you'll need to first activate the Virtual Environment and only then can you run ```TeleCopy```
+Each time you restart the terminal, activate the virtual environment first:
 ```bash
 source .venv/bin/activate
 python main.py
 ```
 ---
-### 🔥 Main Options
+### 🔥 Main Menu
 ```
 0. Connect to Telegram
-1. Select source and destination
-2. Copy Past Messages (Full Clone)
-3. Start live monitoring (Auto-Forward)
-4. Custom Clone (by date)
-5. Update API ID, Hash, Phone
-6. Exit
+1. Set source and destination
+2. Copy full history
+3. Live monitoring (auto-forward)
+4. Copy by date range
+5. Update API credentials
+6. Advanced settings
+7. Exit
 ```
+
+---
+
+### ⚙️ Configuration Reference (`.env`)
+
+| Variable | Required | Description |
+|---|---|---|
+| `PHONE` | ✅ | Your Telegram phone number with country code |
+| `API_ID` | ✅ | From my.telegram.org/apps |
+| `API_HASH` | ✅ | From my.telegram.org/apps |
+| `SOURCE` | ✅* | Source chat ID |
+| `DESTINATION` | ✅* | Destination chat ID |
+| `DB_PASSWORD` | ✅ | Encryption key for the local TDLib database |
+| `FILES_DIRECTORY` | ❌ | Where TDLib stores downloaded media (default: `data/tdlib_files`) |
+| `SEND_COPY` | ❌ | `true` strips "Forwarded from" header; `false` preserves it (default: `true`) |
+| `PROXY_TYPE` | ❌ | `proxyTypeMtproto`, `proxyTypeHttp`, or `proxyTypeSocks5` |
+| `PROXY_SERVER` | ❌ | Proxy hostname |
+| `PROXY_PORT` | ❌ | Proxy port |
+
+\* Set interactively via menu option 1 after connecting.
+
 ---
 ### 🚧 Limitation
-Currently, TeleCopy can only run on Linux based Operating Systems because of
+TeleCopy currently only runs on Linux-based operating systems because of:
 
-```module 'signal' has no attribute 'SIGQUIT'```
+```
+module 'signal' has no attribute 'SIGQUIT'
+```
 
-This error is because Windows Operating System currently doesn't support the library
+This is a constraint of the underlying `python-telegram` / TDLib library on Windows.
 
 ### 🛠️ Workaround
-Use ```WSL``` (Windows Subsystem for Linux) to run ```TeleCopy``` on Windows.
+Use **WSL** (Windows Subsystem for Linux) to run TeleCopy on Windows.
 
-You can ```Google```, How to setup ```WSL``` on Windows.
+Once WSL is set up, follow the setup steps above inside the WSL terminal.
 
-Once ```WSL``` is set up, you can follow the exact setup steps listed above.
+### ⛔ OpenSSL Error
+```
+ImportError: libssl.so.1.1: cannot open shared object file: No such file or directory
+```
 
-### ⛔ Error
-```ImportError: libssl.so.1.1: cannot open shared object file: No such file or directory```
-
-If You encounter an error like this, then just run the following commands
+If you encounter this error, run:
 ```bash
 wget http://nz2.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb
 sudo dpkg -i libssl1.1_1.1.1f-1ubuntu2_amd64.deb
@@ -117,10 +147,11 @@ sudo dpkg -i libssl1.1_1.1.1f-1ubuntu2_amd64.deb
 ---
 
 ### 📦 Dependencies
-```python-telegram```, ```python-dotenv```, ```os```, ```sys```, ```pickle```, ```shutil```, ```threading```, ```datetime```, ```subprocess```, ```time```
+`python-telegram`, `python-dotenv`, `tqdm`, `setuptools`
 
 ### 🤝 Contributions
 Contributions, issues and feature requests are welcome!
 Feel free to submit a PR or open an issue.
 
 # Enjoy using TeleCopy! 🚀
+
