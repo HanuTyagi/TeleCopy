@@ -47,7 +47,7 @@ class TeleCopy:
         self.tg = None
         self.session_active = False
         self.monitoring = False
-        self.config_path = find_dotenv()
+        self.config_path = find_dotenv(usecwd=True) or ".env"
         self._pending_saves = 0
         self.copied: dict[int, int] = {}  # source msg ID → destination msg ID
         self._load_config()
@@ -98,6 +98,8 @@ class TeleCopy:
                     shutil.rmtree(d)
                 except FileNotFoundError:
                     pass
+            self.copied.clear()
+            self._pending_saves = 0
 
         os.makedirs("data", exist_ok=True)
         with open(SESSION_CFG_PATH, "w") as f:
@@ -108,6 +110,7 @@ class TeleCopy:
 
     def _init_telegram(self):
         proxy_type = os.getenv("PROXY_TYPE")
+        proxy_port_raw = os.getenv("PROXY_PORT")
         self.tg = Telegram(
             api_id=os.getenv("API_ID"),
             api_hash=os.getenv("API_HASH"),
@@ -115,7 +118,7 @@ class TeleCopy:
             database_encryption_key=os.getenv("DB_PASSWORD"),
             files_directory=os.getenv("FILES_DIRECTORY", "data/tdlib_files"),
             proxy_server=os.getenv("PROXY_SERVER"),
-            proxy_port=os.getenv("PROXY_PORT"),
+            proxy_port=int(proxy_port_raw) if proxy_port_raw else None,
             proxy_type={"@type": proxy_type} if proxy_type else None,
         )
         self.tg.login()
@@ -132,7 +135,7 @@ class TeleCopy:
         log.info("✅ Source and destination saved.")
 
     def _list_chats(self):
-        result = self.tg.get_chats()
+        result = self.tg.get_chats(limit=200)
         result.wait()
         chat_ids = result.update.get("chat_ids", [])
         log.info("Available chats (%d):", len(chat_ids))
@@ -205,7 +208,8 @@ class TeleCopy:
             "message_ids": [msg_id],
             "send_copy": os.getenv("SEND_COPY", "true").lower() == "true",
         }
-        for attempt in range(1, 6):
+        attempt = 0
+        while attempt < 5:
             try:
                 result = self.tg.call_method("forwardMessages", data, block=True)
                 msgs = result.update.get("messages", [None])
@@ -219,11 +223,14 @@ class TeleCopy:
                 if flood:
                     wait = int(flood.group(1))
                     log.warning(
-                        "FloodWait %ds (attempt %d/5) for message %d – sleeping…",
-                        wait, attempt, msg_id,
+                        "FloodWait %ds for message %d – sleeping…",
+                        wait, msg_id,
                     )
                     time.sleep(wait)
+                    # FloodWait is a server throttle, not a real failure;
+                    # do not count it against the attempt budget.
                 else:
+                    attempt += 1
                     wait = 2 ** attempt
                     log.warning(
                         "Error on attempt %d/5 for message %d: %s (retrying in %ds)",
@@ -236,15 +243,21 @@ class TeleCopy:
     # ── Date helpers ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _parse_date_utc(date_str: str):
-        """Parse 'YYYY-MM-DD' as midnight UTC. Returns None for empty string."""
+    def _parse_date_utc(date_str: str, end_of_day: bool = False):
+        """Parse 'YYYY-MM-DD' as midnight UTC (or 23:59:59 when *end_of_day* is True).
+
+        Returns None for an empty string.
+        """
         if not date_str:
             return None
-        return int(
+        ts = int(
             datetime.strptime(date_str, "%Y-%m-%d")
             .replace(tzinfo=timezone.utc)
             .timestamp()
         )
+        if end_of_day:
+            ts += 86399  # advance to 23:59:59 of the same day
+        return ts
 
     # ── Copy operations ─────────────────────────────────────────────────────
 
@@ -284,15 +297,21 @@ class TeleCopy:
         from_date = input("Start date (YYYY-MM-DD) [blank = from beginning]: ").strip()
         to_date   = input("End date (YYYY-MM-DD)   [blank = until latest]:    ").strip()
         from_ts = self._parse_date_utc(from_date)
-        to_ts   = self._parse_date_utc(to_date)
+        to_ts   = self._parse_date_utc(to_date, end_of_day=True)
 
         log.info("Fetching messages in date range…")
-        filtered = [
-            m for m in self._iter_messages(src)
-            if m.get("content", {}).get("@type") not in EXCLUDE_TYPES
-            and (from_ts is None or m["date"] >= from_ts)
-            and (to_ts   is None or m["date"] <= to_ts)
-        ]
+        filtered = []
+        for m in self._iter_messages(src):
+            msg_date = m["date"]
+            # _iter_messages yields newest-to-oldest; once we go past from_ts
+            # all subsequent messages will be even older — stop early.
+            if from_ts is not None and msg_date < from_ts:
+                break
+            if m.get("content", {}).get("@type") in EXCLUDE_TYPES:
+                continue
+            if to_ts is not None and msg_date > to_ts:
+                continue
+            filtered.append(m)
         filtered.reverse()  # oldest → newest
 
         log.info("Found %d messages in the specified date range.", len(filtered))
@@ -317,6 +336,7 @@ class TeleCopy:
             return
 
         lock = threading.Lock()
+        pending: set[int] = set()  # message IDs currently being forwarded
 
         def handle_update(update):
             if update.get("@type") != "updateNewMessage":
@@ -328,14 +348,19 @@ class TeleCopy:
                 return
             mid = message["id"]
             with lock:
-                if mid in self.copied:
+                if mid in self.copied or mid in pending:
                     return
-            new_id = self.copy_message(src, dst, mid)
-            if new_id:
+                pending.add(mid)
+            try:
+                new_id = self.copy_message(src, dst, mid)
+                if new_id:
+                    with lock:
+                        self._record_copy(mid, new_id)
+                        self.save_copy_map()
+                    log.info("Live copied %d → %d", mid, new_id)
+            finally:
                 with lock:
-                    self._record_copy(mid, new_id)
-                    self.save_copy_map()
-                log.info("Live copied %d → %d", mid, new_id)
+                    pending.discard(mid)
 
         self.monitoring = True
         self.tg.add_update_handler(handle_update)
@@ -347,6 +372,7 @@ class TeleCopy:
             pass
         finally:
             self.monitoring = False
+            self.tg.remove_update_handler(handle_update)
             log.info("Live monitoring stopped.")
 
     # ── Settings ────────────────────────────────────────────────────────────
@@ -365,7 +391,10 @@ class TeleCopy:
             if choice == "0":
                 return
             try:
-                key = keys[int(choice) - 1]
+                idx = int(choice) - 1
+                if idx < 0 or idx >= len(keys):
+                    raise IndexError
+                key = keys[idx]
             except (IndexError, ValueError):
                 print("Invalid selection.")
                 continue
@@ -393,13 +422,14 @@ class TeleCopy:
                     log.info("Removed %s/", d)
                 except FileNotFoundError:
                     pass
+            self.copied.clear()
+            self._pending_saves = 0
             log.info("✅ Session data reset.")
 
     # ── Graceful shutdown ───────────────────────────────────────────────────
 
     def clean_exit(self):
         self.monitoring = False
-        self.save_copy_map()
         if self.tg:
             try:
                 self.tg.stop()
