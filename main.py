@@ -433,7 +433,9 @@ class TeleCopy:
                     pass
             self.copied.clear()
             self._pending_saves = 0
-            log.info("✅ Session data reset.")
+            self.tg = None
+            self.session_active = False
+            log.info("✅ Session data reset. Please reconnect (option 0).")
 
     # ── Graceful shutdown ───────────────────────────────────────────────────
 
@@ -468,6 +470,8 @@ class TeleCopy:
                 self.handle_connection()
             elif choice == "5":
                 self.update_config()
+            elif choice == "6":
+                self.advanced_menu()
             elif choice == "7":
                 self.clean_exit()
             elif not self.session_active:
@@ -480,8 +484,6 @@ class TeleCopy:
                 self.start_live_monitoring()
             elif choice == "4":
                 self.date_copy()
-            elif choice == "6":
-                self.advanced_menu()
             else:
                 print("Invalid choice.")
 
