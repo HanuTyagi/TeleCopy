@@ -27,7 +27,7 @@ logging.basicConfig(
 log = logging.getLogger("telecopy")
 
 # ── Service-message types that should not be forwarded ────────────────────────
-EXCLUDE_TYPES = [
+EXCLUDE_TYPES = frozenset({
     "messageChatChangePhoto", "messageChatChangeTitle",
     "messageBasicGroupChatCreate", "messageChatDeleteMember",
     "messageChatAddMembers", "messagePinMessage",
@@ -35,7 +35,7 @@ EXCLUDE_TYPES = [
     "messageSupergroupChatCreate", "messageChatJoinByLink",
     "messageVideoChatStarted", "messageVideoChatEnded",
     "messageVideoChatScheduled", "messageProximityAlertTriggered",
-]
+})
 
 COPY_MAP_PATH = "data/copy_map.json"
 SESSION_CFG_PATH = "data/last_session_config.json"
@@ -137,12 +137,15 @@ class TeleCopy:
     def _list_chats(self):
         result = self.tg.get_chats(limit=200)
         result.wait()
+        if not result.update:
+            log.error("Failed to retrieve chat list.")
+            return
         chat_ids = result.update.get("chat_ids", [])
         log.info("Available chats (%d):", len(chat_ids))
         for cid in chat_ids:
             r = self.tg.get_chat(cid)
             r.wait()
-            title = r.update.get("title", "Private Chat")
+            title = r.update.get("title", "Private Chat") if r.update else str(cid)
             print(f"  {cid}: {title}")
 
     def _validate_chats(self):
@@ -152,7 +155,11 @@ class TeleCopy:
         if not src or not dst:
             log.error("SOURCE and DESTINATION must be set first (option 1).")
             return None, None
-        return int(src), int(dst)
+        try:
+            return int(src), int(dst)
+        except ValueError:
+            log.error("SOURCE and DESTINATION must be valid integer chat IDs.")
+            return None, None
 
     # ── Copy-map persistence ────────────────────────────────────────────────
 
@@ -231,6 +238,8 @@ class TeleCopy:
                     # do not count it against the attempt budget.
                 else:
                     attempt += 1
+                    if attempt >= 5:
+                        break
                     wait = 2 ** attempt
                     log.warning(
                         "Error on attempt %d/5 for message %d: %s (retrying in %ds)",
