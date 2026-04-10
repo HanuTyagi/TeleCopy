@@ -75,7 +75,12 @@ class TeleCopy:
 
     @staticmethod
     def _fingerprint(api_id: str, api_hash: str, phone: str) -> str:
-        return hashlib.sha256(f"{api_id}{api_hash}{phone}".encode()).hexdigest()
+        # Use a null-byte separator so different splits of the same characters
+        # (e.g. api_id="1", api_hash="23..." vs api_id="12", api_hash="3...")
+        # cannot produce the same hash.
+        return hashlib.sha256(
+            f"{api_id}\x00{api_hash}\x00{phone}".encode()
+        ).hexdigest()
 
     def handle_connection(self):
         self.check_env_vars()
@@ -109,6 +114,16 @@ class TeleCopy:
         log.info("✅ Connected to Telegram.")
 
     def _init_telegram(self):
+        # Stop any previously-created client so its background threads do not
+        # leak when the user reconnects (menu option 0) without restarting.
+        if self.tg:
+            try:
+                self.tg.stop()
+            except Exception:
+                pass
+            self.tg = None
+            self.session_active = False
+
         proxy_type = os.getenv("PROXY_TYPE")
         proxy_port_raw = os.getenv("PROXY_PORT")
         self.tg = Telegram(
@@ -128,10 +143,23 @@ class TeleCopy:
 
     def set_chats(self):
         self._list_chats()
+        load_dotenv(self.config_path, override=True)
+        old_src = os.getenv("SOURCE", "")
         src = input("Enter source chat ID: ").strip()
         dst = input("Enter destination chat ID: ").strip()
         set_key(self.config_path, "SOURCE", src)
         set_key(self.config_path, "DESTINATION", dst)
+        # Message IDs are only unique within a single chat.  If the source chat
+        # changes, IDs from the old chat's copy-map must not suppress messages
+        # from the new chat that happen to share the same numeric IDs.
+        if src != old_src and old_src:
+            self.copied.clear()
+            self._pending_saves = 0
+            try:
+                os.remove(COPY_MAP_PATH)
+            except FileNotFoundError:
+                pass
+            log.info("Source chat changed — copy history cleared.")
         log.info("✅ Source and destination saved.")
 
     def _list_chats(self):
@@ -191,6 +219,9 @@ class TeleCopy:
             try:
                 result = self.tg.get_chat_history(chat_id, limit=100, from_message_id=last)
                 result.wait()
+                if result.update is None:
+                    log.error("No response from TDLib while fetching messages (chat %d).", chat_id)
+                    return
                 batch = result.update.get("messages", [])
                 if not batch:
                     return
@@ -219,6 +250,13 @@ class TeleCopy:
         while attempt < 5:
             try:
                 result = self.tg.call_method("forwardMessages", data, block=True)
+                if result.update is None:
+                    raise ValueError(f"No response from TDLib for message {msg_id}")
+                if result.update.get("@type") == "error":
+                    raise ValueError(
+                        f"TDLib error for message {msg_id}: "
+                        f"{result.update.get('message', 'unknown')}"
+                    )
                 msgs = result.update.get("messages", [None])
                 if not msgs or msgs[0] is None:
                     raise ValueError(f"Null response for message {msg_id}")
@@ -305,8 +343,14 @@ class TeleCopy:
 
         from_date = input("Start date (YYYY-MM-DD) [blank = from beginning]: ").strip()
         to_date   = input("End date (YYYY-MM-DD)   [blank = until latest]:    ").strip()
-        from_ts = self._parse_date_utc(from_date)
-        to_ts   = self._parse_date_utc(to_date, end_of_day=True)
+        try:
+            from_ts = self._parse_date_utc(from_date)
+            to_ts   = self._parse_date_utc(to_date, end_of_day=True)
+        except ValueError:
+            log.error(
+                "Invalid date format. Please use YYYY-MM-DD (e.g. 2024-01-31)."
+            )
+            return
 
         log.info("Fetching messages in date range…")
         filtered = []
