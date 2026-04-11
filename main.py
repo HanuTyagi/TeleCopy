@@ -39,7 +39,9 @@ EXCLUDE_TYPES = frozenset({
 
 COPY_MAP_PATH = "data/copy_map.json"
 SESSION_CFG_PATH = "data/last_session_config.json"
-SAVE_EVERY = 50  # flush copy-map to disk after every N new copies
+SAVE_EVERY = 50          # flush copy-map to disk after every N new copies
+MAX_COPY_ATTEMPTS = 5    # max forwarding attempts before giving up on a message
+MAX_FLOOD_WAIT = 300     # cap server-requested FloodWait to this many seconds
 
 
 class TeleCopy:
@@ -158,26 +160,30 @@ class TeleCopy:
         self._list_chats()
         load_dotenv(self.config_path, override=True)
         old_src = os.getenv("SOURCE", "")
+        old_dst = os.getenv("DESTINATION", "")
         src = input("Enter source chat ID: ").strip()
         dst = input("Enter destination chat ID: ").strip()
         set_key(self.config_path, "SOURCE", src)
         set_key(self.config_path, "DESTINATION", dst)
-        # Message IDs are only unique within a single chat.  If the source chat
-        # changes, IDs from the old chat's copy-map must not suppress messages
-        # from the new chat that happen to share the same numeric IDs.
-        if src != old_src and old_src:
+        # Message IDs are only unique within a single (source, destination) pair.
+        # If either chat changes, stale copy-map entries would suppress forwarding
+        # to the new destination or wrongly attribute IDs from a different source.
+        if (src != old_src and old_src) or (dst != old_dst and old_dst):
             self.copied.clear()
             self._pending_saves = 0
             try:
                 os.remove(COPY_MAP_PATH)
             except FileNotFoundError:
                 pass
-            log.info("Source chat changed — copy history cleared.")
+            log.info("Chat configuration changed — copy history cleared.")
         log.info("✅ Source and destination saved.")
 
     def _list_chats(self):
         seen: set[int] = set()
-        offset_order = 0
+        # TDLib requires the initial offset_order to be Int64.MAX so that
+        # the first page returns the chats with the highest sort order.
+        # Starting at 0 would request chats with order < 0, yielding nothing.
+        offset_order = sys.maxsize
         offset_chat_id = 0
         while True:
             result = self.tg.get_chats(limit=200, offset_order=offset_order, offset_chat_id=offset_chat_id)
@@ -194,18 +200,20 @@ class TeleCopy:
                 return
             if not seen:
                 log.info("Available chats:")
+            last_update = None
             for cid in new_ids:
                 seen.add(cid)
                 r = self.tg.get_chat(cid)
                 r.wait()
                 title = r.update.get("title", "Private Chat") if r.update else str(cid)
                 print(f"  {cid}: {title}")
+                if cid == chat_ids[-1]:
+                    last_update = r.update  # cache to reuse as pagination cursor
             # TDLib uses (order, chat_id) as the pagination cursor for get_chats.
             # The last chat in the batch is the new offset for the next page.
-            last = self.tg.get_chat(chat_ids[-1])
-            last.wait()
-            if last.update:
-                offset_order = last.update.get("order", 0)
+            # Reuse the already-fetched update to avoid a redundant API call.
+            if last_update:
+                offset_order = last_update.get("order", 0)
                 offset_chat_id = chat_ids[-1]
             else:
                 return
@@ -286,7 +294,7 @@ class TeleCopy:
 
         Respects Telegram FloodWait delays and uses exponential back-off for
         other transient failures.  Returns the new message ID on success,
-        or None after 5 failed attempts.
+        or None after MAX_COPY_ATTEMPTS failed attempts.
         """
         data = {
             "chat_id": dst,
@@ -295,7 +303,7 @@ class TeleCopy:
             "send_copy": os.getenv("SEND_COPY", "true").lower() == "true",
         }
         attempt = 0
-        while attempt < 5:
+        while attempt < MAX_COPY_ATTEMPTS:
             try:
                 result = self.tg.call_method("forwardMessages", data, block=True)
                 if result.update is None:
@@ -315,24 +323,34 @@ class TeleCopy:
                 )
                 if flood:
                     wait = int(flood.group(1))
-                    log.warning(
-                        "FloodWait %ds for message %d – sleeping…",
-                        wait, msg_id,
-                    )
+                    # Cap the sleep to avoid freezing the process for hours when
+                    # the server reports an extreme FloodWait (e.g. 86400 s).
+                    if wait > MAX_FLOOD_WAIT:
+                        log.warning(
+                            "Server requested FloodWait of %ds for message %d — "
+                            "capping sleep to %ds.",
+                            wait, msg_id, MAX_FLOOD_WAIT,
+                        )
+                        wait = MAX_FLOOD_WAIT
+                    else:
+                        log.warning(
+                            "FloodWait %ds for message %d – sleeping…",
+                            wait, msg_id,
+                        )
                     time.sleep(wait)
                     # FloodWait is a server throttle, not a real failure;
                     # do not count it against the attempt budget.
                 else:
                     attempt += 1
-                    if attempt >= 5:
+                    if attempt >= MAX_COPY_ATTEMPTS:
                         break
                     wait = 2 ** attempt
                     log.warning(
-                        "Error on attempt %d/5 for message %d: %s (retrying in %ds)",
-                        attempt, msg_id, e, wait,
+                        "Error on attempt %d/%d for message %d: %s (retrying in %ds)",
+                        attempt, MAX_COPY_ATTEMPTS, msg_id, e, wait,
                     )
                     time.sleep(wait)
-        log.error("Failed to copy message %d after 5 attempts.", msg_id)
+        log.error("Failed to copy message %d after %d attempts.", msg_id, MAX_COPY_ATTEMPTS)
         return None
 
     # ── Date helpers ────────────────────────────────────────────────────────
@@ -457,7 +475,6 @@ class TeleCopy:
                 if new_id:
                     with lock:
                         self._record_copy(mid, new_id)
-                        self.save_copy_map()
                     log.info("Live copied %d → %d", mid, new_id)
             finally:
                 with lock:
@@ -473,7 +490,10 @@ class TeleCopy:
             pass
         finally:
             self.monitoring = False
-            self.tg.remove_update_handler(handle_update)
+            try:
+                self.tg.remove_update_handler(handle_update)
+            except Exception:
+                pass
             log.info("Live monitoring stopped.")
 
     # ── Settings ────────────────────────────────────────────────────────────
@@ -501,7 +521,7 @@ class TeleCopy:
                 continue
             new_val = input(f"Enter new value for {key}: ").strip()
             set_key(self.config_path, key, new_val)
-            log.info("%s updated. Restart TeleCopy to apply.", key)
+            log.info("%s updated. Reconnect (option 0) to apply.", key)
 
     def advanced_menu(self):
         print("\nAdvanced Settings:")
