@@ -98,6 +98,14 @@ class TeleCopy:
 
         if old_fp != new_fp:
             log.info("Credentials changed – resetting session…")
+            # Stop the existing client before deleting the directories it uses.
+            if self.tg:
+                try:
+                    self.tg.stop()
+                except Exception:
+                    pass
+                self.tg = None
+                self.session_active = False
             for d in ("tdlib-session", "data"):
                 try:
                     shutil.rmtree(d)
@@ -126,6 +134,11 @@ class TeleCopy:
 
         proxy_type = os.getenv("PROXY_TYPE")
         proxy_port_raw = os.getenv("PROXY_PORT")
+        try:
+            proxy_port = int(proxy_port_raw) if proxy_port_raw else None
+        except ValueError:
+            log.warning("PROXY_PORT '%s' is not a valid integer — proxy disabled.", proxy_port_raw)
+            proxy_port = None
         self.tg = Telegram(
             api_id=os.getenv("API_ID"),
             api_hash=os.getenv("API_HASH"),
@@ -133,7 +146,7 @@ class TeleCopy:
             database_encryption_key=os.getenv("DB_PASSWORD"),
             files_directory=os.getenv("FILES_DIRECTORY", "data/tdlib_files"),
             proxy_server=os.getenv("PROXY_SERVER"),
-            proxy_port=int(proxy_port_raw) if proxy_port_raw else None,
+            proxy_port=proxy_port,
             proxy_type={"@type": proxy_type} if proxy_type else None,
         )
         self.tg.login()
@@ -163,18 +176,42 @@ class TeleCopy:
         log.info("✅ Source and destination saved.")
 
     def _list_chats(self):
-        result = self.tg.get_chats(limit=200)
-        result.wait()
-        if not result.update:
-            log.error("Failed to retrieve chat list.")
-            return
-        chat_ids = result.update.get("chat_ids", [])
-        log.info("Available chats (%d):", len(chat_ids))
-        for cid in chat_ids:
-            r = self.tg.get_chat(cid)
-            r.wait()
-            title = r.update.get("title", "Private Chat") if r.update else str(cid)
-            print(f"  {cid}: {title}")
+        seen: set[int] = set()
+        offset_order = 0
+        offset_chat_id = 0
+        while True:
+            result = self.tg.get_chats(limit=200, offset_order=offset_order, offset_chat_id=offset_chat_id)
+            result.wait()
+            if not result.update:
+                if not seen:
+                    log.error("Failed to retrieve chat list.")
+                return
+            chat_ids = result.update.get("chat_ids", [])
+            if not chat_ids:
+                return
+            new_ids = [cid for cid in chat_ids if cid not in seen]
+            if not new_ids:
+                return
+            if not seen:
+                log.info("Available chats:")
+            for cid in new_ids:
+                seen.add(cid)
+                r = self.tg.get_chat(cid)
+                r.wait()
+                title = r.update.get("title", "Private Chat") if r.update else str(cid)
+                print(f"  {cid}: {title}")
+            # TDLib uses (order, chat_id) as the pagination cursor for get_chats.
+            # The last chat in the batch is the new offset for the next page.
+            last = self.tg.get_chat(chat_ids[-1])
+            last.wait()
+            if last.update:
+                offset_order = last.update.get("order", 0)
+                offset_chat_id = chat_ids[-1]
+            else:
+                return
+            # If fewer results than requested, we've reached the end.
+            if len(chat_ids) < 200:
+                return
 
     def _validate_chats(self):
         load_dotenv(self.config_path, override=True)
@@ -184,10 +221,14 @@ class TeleCopy:
             log.error("SOURCE and DESTINATION must be set first (option 1).")
             return None, None
         try:
-            return int(src), int(dst)
+            src_id, dst_id = int(src), int(dst)
         except ValueError:
             log.error("SOURCE and DESTINATION must be valid integer chat IDs.")
             return None, None
+        if src_id == dst_id:
+            log.error("SOURCE and DESTINATION must be different chats.")
+            return None, None
+        return src_id, dst_id
 
     # ── Copy-map persistence ────────────────────────────────────────────────
 
@@ -195,7 +236,7 @@ class TeleCopy:
         try:
             with open(COPY_MAP_PATH) as f:
                 return {int(k): v for k, v in json.load(f).items()}
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError):
             return {}
 
     def save_copy_map(self):
@@ -215,6 +256,7 @@ class TeleCopy:
     def _iter_messages(self, chat_id: int):
         """Yield message objects from *chat_id*, newest-to-oldest, in batches of 100."""
         last = 0
+        seen_ids: set[int] = set()
         while True:
             try:
                 result = self.tg.get_chat_history(chat_id, limit=100, from_message_id=last)
@@ -225,7 +267,13 @@ class TeleCopy:
                 batch = result.update.get("messages", [])
                 if not batch:
                     return
-                yield from batch
+                new_messages = [m for m in batch if m["id"] not in seen_ids]
+                if not new_messages:
+                    # Every message in this batch was already yielded — pagination stalled.
+                    return
+                for m in new_messages:
+                    seen_ids.add(m["id"])
+                    yield m
                 last = batch[-1]["id"]
             except Exception as e:
                 log.error("Error fetching messages: %s", e)
@@ -431,7 +479,7 @@ class TeleCopy:
     # ── Settings ────────────────────────────────────────────────────────────
 
     def update_config(self):
-        """Interactively update API credentials without restarting."""
+        """Interactively update API credentials. Changes take effect on reconnect (option 0)."""
         load_dotenv(self.config_path, override=True)
         keys = ["PHONE", "API_ID", "API_HASH"]
         current = {k: os.getenv(k, "Not Set") for k in keys}
@@ -469,6 +517,11 @@ class TeleCopy:
             except FileNotFoundError:
                 log.info("No copy history found.")
         elif choice == "2":
+            if self.tg:
+                try:
+                    self.tg.stop()
+                except Exception:
+                    pass
             for d in ("tdlib-session", "data"):
                 try:
                     shutil.rmtree(d)
