@@ -51,6 +51,7 @@ class TeleCopy:
         self.monitoring = False
         self.config_path = find_dotenv(usecwd=True) or ".env"
         self._pending_saves = 0
+        self._copy_lock = threading.RLock()  # RLock: _record_copy re-enters via save_copy_map
         self.copied: dict[int, int] = {}  # source msg ID → destination msg ID
         self._load_config()
         atexit.register(self.save_copy_map)
@@ -211,7 +212,14 @@ class TeleCopy:
                     last_update = r.update  # cache to reuse as pagination cursor
             # TDLib uses (order, chat_id) as the pagination cursor for get_chats.
             # The last chat in the batch is the new offset for the next page.
-            # Reuse the already-fetched update to avoid a redundant API call.
+            # Reuse the already-fetched update when possible to avoid a redundant
+            # API call, but if chat_ids[-1] was already in `seen` (TDLib can
+            # return slight overlaps when sort-order shifts in real-time), the
+            # loop above never touches it, so fetch it separately.
+            if last_update is None:
+                r = self.tg.get_chat(chat_ids[-1])
+                r.wait()
+                last_update = r.update
             if last_update:
                 offset_order = last_update.get("order", 0)
                 offset_chat_id = chat_ids[-1]
@@ -248,16 +256,18 @@ class TeleCopy:
             return {}
 
     def save_copy_map(self):
-        os.makedirs("data", exist_ok=True)
-        with open(COPY_MAP_PATH, "w") as f:
-            json.dump(self.copied, f)
-        self._pending_saves = 0
+        with self._copy_lock:
+            os.makedirs("data", exist_ok=True)
+            with open(COPY_MAP_PATH, "w") as f:
+                json.dump(self.copied, f)
+            self._pending_saves = 0
 
     def _record_copy(self, src_id: int, dst_id: int):
-        self.copied[src_id] = dst_id
-        self._pending_saves += 1
-        if self._pending_saves >= SAVE_EVERY:
-            self.save_copy_map()
+        with self._copy_lock:
+            self.copied[src_id] = dst_id
+            self._pending_saves += 1
+            if self._pending_saves >= SAVE_EVERY:
+                self.save_copy_map()
 
     # ── Message fetching (streaming — low RAM footprint) ────────────────────
 
@@ -454,7 +464,6 @@ class TeleCopy:
         if src is None:
             return
 
-        lock = threading.Lock()
         pending: set[int] = set()  # message IDs currently being forwarded
 
         def handle_update(update):
@@ -466,18 +475,17 @@ class TeleCopy:
             if message.get("content", {}).get("@type") in EXCLUDE_TYPES:
                 return
             mid = message["id"]
-            with lock:
+            with self._copy_lock:
                 if mid in self.copied or mid in pending:
                     return
                 pending.add(mid)
             try:
                 new_id = self.copy_message(src, dst, mid)
                 if new_id:
-                    with lock:
-                        self._record_copy(mid, new_id)
+                    self._record_copy(mid, new_id)
                     log.info("Live copied %d → %d", mid, new_id)
             finally:
-                with lock:
+                with self._copy_lock:
                     pending.discard(mid)
 
         self.monitoring = True
